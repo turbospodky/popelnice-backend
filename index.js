@@ -1,7 +1,10 @@
 const express = require('express');
 const mysql = require('mysql');
 const cors = require('cors');
+const bcrypt = require('bcrypt');
 const app = express();
+
+const saltRounds = 10;
 
 app.use(cors());
 app.use(express.urlencoded({extended: true}));
@@ -26,6 +29,30 @@ const db = mysql.createConnection({
 //
 
 let activeSessions = [];
+
+function getSession(token) {
+    for (let i = 0; i < activeSessions.length; i++) {
+        if (token == activeSessions.token) {
+            return activeSessions[i];
+        }
+    }
+    return null;
+}
+
+function deleteSession(token) {
+    console.log('deleting for session with token '+token);
+    let newActiveSessions = [];
+    let deleted = false;
+    for (let i = 0; i < activeSessions.length; i++) {
+        if (token != activeSessions[i].token) {
+            newActiveSessions.push(activeSessions[i]);
+        } else {
+            deleted = true;
+        }
+    }
+    activeSessions = newActiveSessions;
+    return deleted;
+}
 
 function generateToken () {
     return Math.random().toString(36).substr(2) + Math.random().toString(36).substr(2);
@@ -58,9 +85,13 @@ function login(username, townPrefix, isAdmin) {
 }
 
 app.get('/sessions', (req, res) => {
-    console.log(activeSessions);
     res.send(activeSessions);
 });
+
+async function encryptPassword(plainTextPassword) {
+    const encrypted = await bcrypt.hash(plainTextPassword, saltRounds);
+    console.log(plainTextPassword + '=>' + encrypted);
+}
 
 
 
@@ -78,8 +109,8 @@ app.post('/login', (req, res) => {
     const password = req.body.password;
 
     db.query(
-        'SELECT * FROM users WHERE username = ? AND password = ?',
-        [username, password],
+        'SELECT * FROM users WHERE username = ?',
+        [username],
         (err, rows, fields) => {
             if (err) {
                 console.log(err);
@@ -87,16 +118,32 @@ app.post('/login', (req, res) => {
 
             if (rows.length != 0) {
                 const user = rows[0];
-                const token = login(user.username, user.townPrefix, user.isAdmin);
-                res.send({
-                    token: token,
-                    isAdmin: user.isAdmin
+                bcrypt.compare(password, user.password, function(err, result) {
+                    if (result) {
+                        const token = login(user.username, user.townPrefix, user.isAdmin);
+                        res.send({
+                            token: token,
+                            isAdmin: user.isAdmin
+                        });
+                    } else {
+                        res.sendStatus(403);
+                    } 
                 });
             } else {
                 res.sendStatus(403);
-            }           
+            }         
         }
     );
+});
+
+app.post('/logout', (req) => {
+    const token = req.body.token;
+    const deleted = deleteSession(token);
+    if (deleted) {
+        res.sendStatus(200);
+    } else {
+        res.sendStatus(403);
+    }
 });
 
 app.post('/verifyToken', (req, res) => {
