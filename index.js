@@ -104,7 +104,9 @@ app.post('/verifyToken', (req, res) => {
     console.log('verifying ' + tokenToVerify);
     for (let i = 0; i < activeSessions.length; i++) {
         if (tokenToVerify == activeSessions[i].token) {
-            res.sendStatus(200);
+            res.send({
+                isAdmin: !!activeSessions[i].isAdmin
+            });
             return;
         }
     }
