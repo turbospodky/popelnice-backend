@@ -136,7 +136,7 @@ app.post('/login', (req, res) => {
     );
 });
 
-app.post('/logout', (req) => {
+app.post('/logout', (req, res) => {
     const token = req.body.token;
     const deleted = deleteSession(token);
     if (deleted) {
@@ -203,7 +203,7 @@ async function getRecordsByCount (townPrefix, containerId, count) {
 
 
 //
-//GET DATA API
+//API
 //
 
 app.post('/getTownData', async (req, res) => {
@@ -338,44 +338,78 @@ app.get('/getRecords/:id/days/:days', (req, res) => {
     );
 });
 
-app.get('/getSites', (req, res) => {
-    db.query(
-        'SELECT * FROM jicin__sites',
-        (err, result) => {
-            if (err) {
-                console.log(err);
-            }
+app.post('/renameSite', (req, res) => {
+    const token = req.body.token;
+    const siteId = req.body.siteId;
+    const newName = req.body.newName;
 
-            res.send(result);
-        }
-    );
+    const session = getSession(token);
+
+    if (!newName || newName == '') {
+        res.sendStatus(500); //nepodařilo se provést změny
+        return;
+    }
+
+    let failed = false;
+
+    if (session && session.isAdmin) {
+        const townPrefix = session.townPrefix;
+
+        db.query(
+            'UPDATE ?__sites SET name = "?" WHERE id = ?',
+            [townPrefix, newName, siteId],
+            (err) => {
+                if (err) {
+                    failed = true;
+                    res.sendStatus(500);
+                } else {
+                    res.sendStatus(200);
+                }
+            }
+        );
+    } else {
+        res.sendStatus(403);
+    }
 });
 
-app.get('/getContainers', (req, res) => {
-    db.query(
-        'SELECT * FROM jicin__containers',
-        (err, result) => {
-            if (err) {
-                console.log(err);
-            }
+// app.get('/getSites', (req, res) => {
+//     db.query(
+//         'SELECT * FROM jicin__sites',
+//         (err, result) => {
+//             if (err) {
+//                 console.log(err);
+//             }
 
-            res.send(result);
-        }
-    );
-});
+//             res.send(result);
+//         }
+//     );
+// });
 
-app.get('/getWasteTypes', (req, res) => {
-    db.query(
-        'SELECT * FROM jicin__wastetypes',
-        (err, result) => {
-            if (err) {
-                console.log(err);
-            }
+// app.get('/getContainers', (req, res) => {
+//     db.query(
+//         'SELECT * FROM jicin__containers',
+//         (err, result) => {
+//             if (err) {
+//                 console.log(err);
+//             }
 
-            res.send(result);
-        }
-    );
-});
+//             res.send(result);
+//         }
+//     );
+// });
+
+// app.get('/getWasteTypes', (req, res) => {
+//     db.query(
+//         'SELECT * FROM jicin__wastetypes',
+//         (err, result) => {
+//             if (err) {
+//                 console.log(err);
+//             }
+
+//             res.send(result);
+//         }
+//     );
+// });
 
 
 
