@@ -2,9 +2,12 @@ const express = require('express');
 const mysql = require('mysql');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
+const schedule = require('node-schedule');
 const app = express();
 
 const saltRounds = 10;
+const tokenLength = 150;
+const sessionLifeLength = 3600;
 
 app.use(cors());
 app.use(express.urlencoded({extended: true}));
@@ -16,6 +19,10 @@ const db = mysql.createConnection({
     password: 'medved',
     database: 'db_test'
 })
+
+const clearOldSessionsJob = schedule.scheduleJob('01 * * * * *', function() {
+    clearOldSessions();
+});
 
 
 
@@ -32,7 +39,7 @@ let activeSessions = [];
 
 function getSession(token) {
     for (let i = 0; i < activeSessions.length; i++) {
-        if (token == activeSessions.token) {
+        if (token == activeSessions[i].token) {
             return activeSessions[i];
         }
     }
@@ -40,7 +47,6 @@ function getSession(token) {
 }
 
 function deleteSession(token) {
-    console.log('deleting for session with token '+token);
     let newActiveSessions = [];
     let deleted = false;
     for (let i = 0; i < activeSessions.length; i++) {
@@ -55,7 +61,11 @@ function deleteSession(token) {
 }
 
 function generateToken () {
-    return Math.random().toString(36).substr(2) + Math.random().toString(36).substr(2);
+    let token = '';
+    for (let i = 0; i < tokenLength; i++) {
+        token += Math.random().toString(36).substr(2);
+    }
+    return token;
 }
 
 function login(username, townPrefix, isAdmin) {
@@ -77,11 +87,20 @@ function login(username, townPrefix, isAdmin) {
         token: token,
         username: username,
         townPrefix: townPrefix,
-        isAdmin: isAdmin,
+        isAdmin: !!isAdmin,
         created: Date.now()
     });
 
     return token;
+}
+
+function clearOldSessions() {
+    for (let i = 0; i < activeSessions.length; i++) {
+        const secondsSinceCreated = (Date.now() - activeSessions[i].created) / 1000;
+        if (secondsSinceCreated > sessionLifeLength) {
+            deleteSession(activeSessions[i].token);
+        }
+    }
 }
 
 app.get('/sessions', (req, res) => {
@@ -148,9 +167,9 @@ app.post('/logout', (req, res) => {
 
 app.post('/verifyToken', (req, res) => {
     const tokenToVerify = req.body.token;
-    console.log('verifying ' + tokenToVerify);
     for (let i = 0; i < activeSessions.length; i++) {
         if (tokenToVerify == activeSessions[i].token) {
+            activeSessions[i].created = Date.now();
             res.send({
                 isAdmin: !!activeSessions[i].isAdmin
             });
@@ -352,12 +371,14 @@ app.post('/renameSite', (req, res) => {
 
     let failed = false;
 
+    console.log('snazi se prejmenovat stanoviste, admin: '+ session.isAdmin);
+
     if (session && session.isAdmin) {
         const townPrefix = session.townPrefix;
-
+        console.log(newName);
         db.query(
-            'UPDATE ?__sites SET name = "?" WHERE id = ?',
-            [townPrefix, newName, siteId],
+            'UPDATE '+townPrefix+'__sites SET name = \''+newName+'\' WHERE id = ?',
+            [siteId],
             (err) => {
                 if (err) {
                     failed = true;
@@ -417,3 +438,4 @@ app.post('/renameSite', (req, res) => {
 app.listen(3001, () => {
     console.log('backend server running on localhost:3001');
 });
+
