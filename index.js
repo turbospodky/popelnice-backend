@@ -20,7 +20,7 @@ const db = mysql.createConnection({
     database: 'db_test'
 })
 
-const clearOldSessionsJob = schedule.scheduleJob('01 * * * * *', function() {
+const clearOldSessionsJob = schedule.scheduleJob('01 * * * *', function() {
     clearOldSessions();
 });
 
@@ -285,6 +285,7 @@ app.post('/getTownData', async (req, res) => {
         }
 
         latestRecord = latestRecord[0];
+        delete containers[i].key;
         containers[i].fill = Math.round(latestRecord.fill * 100) / 100;
         containers[i].blocked = latestRecord.blocked;
         containers[i].baterry = latestRecord.baterry;
@@ -340,9 +341,9 @@ app.get('/getRecords/:id/count/:limit', (req, res) => {
 });
 
 app.get('/getRecords/:id/days/:days', (req, res) => {
-
     const id = parseInt(req.params.id);
     const days = parseInt(req.params.days);
+    
     
     db.query(
         'SELECT *, TIMESTAMPDIFF(MINUTE, record_datetime, NOW()) / 1440 AS difference_days, DATE_FORMAT(record_datetime, \'%e. %c. %Y\') AS record_datetime_formated FROM jicin__records WHERE container_id = ? HAVING difference_days <= ? ORDER BY record_datetime DESC',
@@ -353,6 +354,116 @@ app.get('/getRecords/:id/days/:days', (req, res) => {
             }
             
             res.send(result);
+        }
+    );
+});
+
+app.post('/averageFillTimePerType', (req, res) => {
+    const token = req.body.token;
+    const session = getSession(token);
+    if (session === null) {
+        res.sendStatus(403);
+        return;
+    }
+
+    const townPrefix = session.townPrefix;
+    const sites = req.body.sites;
+    const days = req.body.time;
+
+    let sqlSiteRestriction = '';
+    let sqlTimeRestriction = '';
+    if (typeof(sites) == 'number') {
+        sqlSiteRestriction = ' AND site_id = '+sites;
+    }
+    if (days != 0) {
+        sqlTimeRestriction = ' WHERE TIMESTAMPDIFF(DAY, record_datetime, NOW()) < '+days;
+    }
+
+    db.query(
+        'SELECT type_id, container_id, fill, TIMESTAMPDIFF(HOUR, record_datetime, NOW()) AS hours_passed'+
+        ' FROM '+townPrefix+'__records'+
+        ' INNER JOIN '+townPrefix+'__containers ON '+townPrefix+'__records.container_id = '+townPrefix+'__containers.id'+
+        sqlTimeRestriction+
+        sqlSiteRestriction+
+        ' ORDER BY type_id, container_id, record_datetime',
+        [],
+        (err, result) => {
+            if (err) {
+                console.log(err);
+                res.sendStatus(500);
+            } else {
+                let usedContainerIds = [];
+                let containerHistories = []; //[container_id => {type: 1, avg: 5},...]
+
+                result.forEach(record => {
+                    const containerId = record.container_id;
+
+                    if (!usedContainerIds.includes(containerId)) {
+                        usedContainerIds.push(containerId);
+                        containerHistories[containerId] = {
+                            type: record.type_id,
+                            history: []
+                        };
+                    }
+
+                    containerHistories[containerId].history.push({
+                        fill: record.fill,
+                        hoursPassed: record.hours_passed,
+                        daysFromPreviousRecord: 0,
+                        fillDifference: 0
+                    });
+
+                    let lastHistoryIndex = containerHistories[containerId].history.length - 1;
+                    if (lastHistoryIndex > 0) {
+                        const history = containerHistories[containerId].history;
+
+                        const daysFromPreviousRecord = (history[lastHistoryIndex - 1].hoursPassed - history[lastHistoryIndex].hoursPassed)/24;
+                        let fillDifference = history[lastHistoryIndex].fill - history[lastHistoryIndex - 1].fill;
+                        if (fillDifference <= -0.3) { //-30% is just a random temporary value to detect an emptying until an ideal one is measured
+                            fillDifference = history[lastHistoryIndex].fill;
+                        }
+
+
+                        containerHistories[containerId].history[lastHistoryIndex].daysFromPreviousRecord = daysFromPreviousRecord;
+                        containerHistories[containerId].history[lastHistoryIndex].fillDifference = fillDifference;
+                    }
+                });
+
+                let usedTypeIds = [];
+                let typeAverages = [];
+
+                containerHistories.forEach(containerHistory => {
+                    const typeId = containerHistory.type;
+
+                    if (!usedTypeIds.includes(typeId)) {
+                        usedTypeIds.push(typeId);
+                        typeAverages[typeId] = {
+                            fillSum: 0,
+                            daysSum: 0
+                        };
+                    }
+
+                    containerHistory.history.forEach(record => {
+                        typeAverages[typeId].fillSum += record.fillDifference;
+                        typeAverages[typeId].daysSum += record.daysFromPreviousRecord;
+                    });
+                });
+
+                let response = [];
+                usedTypeIds.forEach(typeId => {
+                    const fillSum = typeAverages[typeId].fillSum;
+                    const daysSum = typeAverages[typeId].daysSum;
+                    
+                    const averageDaysToFill = fillSum == 0 ? 0 : daysSum/fillSum;
+
+                    response.push({
+                        typeId: typeId,
+                        daysToFill: averageDaysToFill
+                    });
+                });
+
+                res.send(response);
+            }
         }
     );
 });
@@ -369,10 +480,6 @@ app.post('/renameSite', (req, res) => {
         return;
     }
 
-    let failed = false;
-
-    console.log('snazi se prejmenovat stanoviste, admin: '+ session.isAdmin);
-
     if (session && session.isAdmin) {
         const townPrefix = session.townPrefix;
         console.log(newName);
@@ -381,7 +488,6 @@ app.post('/renameSite', (req, res) => {
             [siteId],
             (err) => {
                 if (err) {
-                    failed = true;
                     res.sendStatus(500);
                 } else {
                     res.sendStatus(200);
@@ -393,44 +499,51 @@ app.post('/renameSite', (req, res) => {
     }
 });
 
-// app.get('/getSites', (req, res) => {
-//     db.query(
-//         'SELECT * FROM jicin__sites',
-//         (err, result) => {
-//             if (err) {
-//                 console.log(err);
-//             }
+app.put('/newRecord', (req, res) => {
+    const townPrefix = req.body.town;
+    const containerId = req.body.containerId;
+    const containerKey = req.body.containerKey;
 
-//             res.send(result);
-//         }
-//     );
-// });
+    const dateTime = req.body.record.dateTime;
+    const fill = req.body.record.fill;
+    const baterry = req.body.record.baterry;
+    const blocked = req.body.record.blocked;
+    
+    db.query(
+        'SELECT * FROM '+townPrefix+'__containers WHERE id = ?',
+        [containerId],
+        (err, result) => {
+            if (err) {
+                console.log(err);
+                res.sendStatus(400);
+            } else {
+                console.log('comparing', containerKey, result[0]);
+                bcrypt.compare(containerKey, result[0].key, function(err, result) {
+                    if (result) {
 
-// app.get('/getContainers', (req, res) => {
-//     db.query(
-//         'SELECT * FROM jicin__containers',
-//         (err, result) => {
-//             if (err) {
-//                 console.log(err);
-//             }
+                        //put the record in the database
+                        db.query('INSERT INTO '+townPrefix+'__records (container_id, record_datetime, fill, baterry, blocked) VALUES ( ?, ?, ?, ?, ?)',
+                        [containerId, dateTime, fill, baterry, blocked],
+                        (err, result) => {
+                            if (err) {
+                                console.log(err),
+                                res.sendStatus(500);
+                            } else {
+                                res.sendStatus(200);
+                                //maybe notify logged-in clients
+                            }
+                        });
 
-//             res.send(result);
-//         }
-//     );
-// });
+                    } else {
+                        res.sendStatus(403);
+                    } 
+                });
+            }
+        }
+    );
+});
 
-// app.get('/getWasteTypes', (req, res) => {
-//     db.query(
-//         'SELECT * FROM jicin__wastetypes',
-//         (err, result) => {
-//             if (err) {
-//                 console.log(err);
-//             }
 
-//             res.send(result);
-//         }
-//     );
-// });
 
 
 
@@ -438,4 +551,3 @@ app.post('/renameSite', (req, res) => {
 app.listen(3001, () => {
     console.log('backend server running on localhost:3001');
 });
-
