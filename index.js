@@ -4,23 +4,56 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const schedule = require('node-schedule');
 const app = express();
+const path = __dirname + '/views/';
+require('dotenv').config();
+var corsOptions = {
+    origin: "http://localhost:3001"
+};
 
 const saltRounds = 10;
 const tokenLength = 150;
 const sessionLifeLength = 3600;
 
-app.use(cors());
-app.use(express.urlencoded({extended: true}));
+app.use(express.static(path));
+app.use(cors(corsOptions));
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const db = mysql.createConnection({
-    user: 'root',
-    host: 'localhost',
-    password: 'medved',
-    database: 'db_test'
-})
+const dbConfig = {
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_DATABASE
+};
 
-const clearOldSessionsJob = schedule.scheduleJob('01 * * * *', function() {
+let db;
+
+function handleDisconnect() {
+    db = mysql.createConnection(dbConfig); // Recreate the connection, since
+    // the old one cannot be reused.
+
+    db.connect(function (err) {              // The server is either down
+        if (err) {                                     // or restarting (takes a while sometimes).
+            console.log('error when connecting to db:', err);
+            setTimeout(handleDisconnect, 2000); // We introduce a delay before attempting to reconnect,
+        }                                     // to avoid a hot loop, and to allow our node script to
+    });                                     // process asynchronous requests in the meantime.
+    // If you're also serving http, display a 503 error.
+    db.on('error', function (err) {
+        
+        if (err.code === 'PROTOCOL_CONNECTION_LOST') { // Connection to the MySQL server is usually
+            console.log('reconnecting to db');
+            handleDisconnect();                         // lost due to either server restart, or a
+        } else {        
+            console.log('db error', err);                              // connnection idle timeout (the wait_timeout
+            throw err;                                  // server variable configures this)
+        }
+    });
+}
+
+handleDisconnect();
+
+const clearOldSessionsJob = schedule.scheduleJob('01 * * * *', function () {
     clearOldSessions();
 });
 
@@ -60,7 +93,7 @@ function deleteSession(token) {
     return deleted;
 }
 
-function generateToken () {
+function generateToken() {
     let token = '';
     for (let i = 0; i < tokenLength; i++) {
         token += Math.random().toString(36).substr(2);
@@ -103,6 +136,10 @@ function clearOldSessions() {
     }
 }
 
+app.get('/', function (req, res) {
+    res.sendFile(path + "index.html");
+});
+
 app.get('/sessions', (req, res) => {
     res.send(activeSessions);
 });
@@ -137,20 +174,22 @@ app.post('/login', (req, res) => {
 
             if (rows.length != 0) {
                 const user = rows[0];
-                bcrypt.compare(password, user.password, function(err, result) {
+                bcrypt.compare(password, user.password, function (err, result) {
                     if (result) {
                         const token = login(user.username, user.townPrefix, user.isAdmin);
-                        res.send({
-                            token: token,
-                            isAdmin: user.isAdmin
+                        updateRecords(user.townPrefix).then(function () {
+                            res.send({
+                                token: token,
+                                isAdmin: user.isAdmin
+                            });
                         });
                     } else {
                         res.sendStatus(403);
-                    } 
+                    }
                 });
             } else {
                 res.sendStatus(403);
-            }         
+            }
         }
     );
 });
@@ -190,7 +229,7 @@ app.post('/verifyToken', (req, res) => {
 //DATA FETCHING FUNCTIONALITY
 //
 
-async function getTable (townPrefix, tableName) {
+async function getTable(townPrefix, tableName) {
     return new Promise((resolve, reject) => {
         db.query(
             'SELECT * FROM ' + townPrefix + '__' + tableName,
@@ -202,7 +241,7 @@ async function getTable (townPrefix, tableName) {
     });
 }
 
-async function getRecordsByCount (townPrefix, containerId, count) {
+async function getRecordsByCount(townPrefix, containerId, count) {
     return new Promise((resolve, reject) => {
         db.query(
             'SELECT *, TIMESTAMPDIFF(MINUTE, record_datetime, NOW()) / 1440 AS difference_days FROM ' + townPrefix + '__records WHERE container_id = ? ORDER BY record_datetime DESC LIMIT ?',
@@ -212,6 +251,27 @@ async function getRecordsByCount (townPrefix, containerId, count) {
                 resolve(result);
             }
         );
+    });
+}
+
+async function updateRecords(town) {
+    return new Promise((resolve, reject) => {
+        db.query(
+            'SELECT FLOOR(TIMESTAMPDIFF(HOUR, record_datetime, CURRENT_TIMESTAMP)/24) AS days ' +
+            'FROM ' + town + '__records ' +
+            'ORDER BY record_datetime DESC LIMIT 1',
+            [],
+            function (err, result) {
+                if (err) reject(err);
+                db.query('UPDATE ' + town + '__records ' +
+                    'SET record_datetime = date_add(record_datetime, INTERVAL ? DAY) ' +
+                    'WHERE id > -1',
+                    [result[0]['days']],
+                    function (err, result) {
+                        if (err) reject(err);
+                        resolve();
+                    })
+            });
     });
 }
 
@@ -250,22 +310,22 @@ app.post('/getTownData', async (req, res) => {
     let returnServerError = false;
 
     const wasteTypes = await getTable(session.townPrefix, 'wastetypes')
-    .catch((err) => {
-        console.log(err);
-        returnServerError = true;
-    });
+        .catch((err) => {
+            console.log(err);
+            returnServerError = true;
+        });
 
     const sites = await getTable(session.townPrefix, 'sites')
-    .catch((err) => {
-        console.log(err);
-        returnServerError = true;
-    });
+        .catch((err) => {
+            console.log(err);
+            returnServerError = true;
+        });
 
     const containers = await getTable(session.townPrefix, 'containers')
-    .catch((err) => {
-        console.log(err);
-        returnServerError = true;
-    });
+        .catch((err) => {
+            console.log(err);
+            returnServerError = true;
+        });
 
     if (returnServerError) {
         res.sendStatus(500);
@@ -274,10 +334,10 @@ app.post('/getTownData', async (req, res) => {
 
     for (let i = 0; i < containers.length; i++) {
         let latestRecord = await getRecordsByCount(session.townPrefix, containers[i].id, 1)
-        .catch((err) => {
-            console.log(err);
-            returnServerError = true;
-        });
+            .catch((err) => {
+                console.log(err);
+                returnServerError = true;
+            });
 
         if (returnServerError) {
             res.sendStatus(500);
@@ -315,7 +375,7 @@ app.post('/getTownData', async (req, res) => {
         wasteTypes: wasteTypes,
         sites: sites
     }
-    
+
     res.send(result);
 });
 
@@ -343,8 +403,8 @@ app.get('/getRecords/:id/count/:limit', (req, res) => {
 app.get('/getRecords/:id/days/:days', (req, res) => {
     const id = parseInt(req.params.id);
     const days = parseInt(req.params.days);
-    
-    
+
+
     db.query(
         'SELECT *, TIMESTAMPDIFF(MINUTE, record_datetime, NOW()) / 1440 AS difference_days, DATE_FORMAT(record_datetime, \'%e. %c. %Y\') AS record_datetime_formated FROM jicin__records WHERE container_id = ? HAVING difference_days <= ? ORDER BY record_datetime DESC',
         [id, days],
@@ -352,7 +412,7 @@ app.get('/getRecords/:id/days/:days', (req, res) => {
             if (err) {
                 console.log(err);
             }
-            
+
             res.send(result);
         }
     );
@@ -372,19 +432,19 @@ app.post('/averageFillTimePerType', (req, res) => {
 
     let sqlSiteRestriction = '';
     let sqlTimeRestriction = '';
-    if (typeof(sites) == 'number') {
-        sqlSiteRestriction = ' AND site_id = '+sites;
+    if (typeof (sites) == 'number') {
+        sqlSiteRestriction = ' AND site_id = ' + sites;
     }
     if (days != 0) {
-        sqlTimeRestriction = ' WHERE TIMESTAMPDIFF(DAY, record_datetime, NOW()) < '+days;
+        sqlTimeRestriction = ' WHERE TIMESTAMPDIFF(DAY, record_datetime, NOW()) < ' + days;
     }
 
     db.query(
-        'SELECT type_id, container_id, fill, TIMESTAMPDIFF(HOUR, record_datetime, NOW()) AS hours_passed'+
-        ' FROM '+townPrefix+'__records'+
-        ' INNER JOIN '+townPrefix+'__containers ON '+townPrefix+'__records.container_id = '+townPrefix+'__containers.id'+
-        sqlTimeRestriction+
-        sqlSiteRestriction+
+        'SELECT type_id, container_id, fill, TIMESTAMPDIFF(HOUR, record_datetime, NOW()) AS hours_passed' +
+        ' FROM ' + townPrefix + '__records' +
+        ' INNER JOIN ' + townPrefix + '__containers ON ' + townPrefix + '__records.container_id = ' + townPrefix + '__containers.id' +
+        sqlTimeRestriction +
+        sqlSiteRestriction +
         ' ORDER BY type_id, container_id, record_datetime',
         [],
         (err, result) => {
@@ -417,7 +477,7 @@ app.post('/averageFillTimePerType', (req, res) => {
                     if (lastHistoryIndex > 0) {
                         const history = containerHistories[containerId].history;
 
-                        const daysFromPreviousRecord = (history[lastHistoryIndex - 1].hoursPassed - history[lastHistoryIndex].hoursPassed)/24;
+                        const daysFromPreviousRecord = (history[lastHistoryIndex - 1].hoursPassed - history[lastHistoryIndex].hoursPassed) / 24;
                         let fillDifference = history[lastHistoryIndex].fill - history[lastHistoryIndex - 1].fill;
                         if (fillDifference <= -0.3) { //-30% is just a random temporary value to detect an emptying until an ideal one is measured
                             fillDifference = history[lastHistoryIndex].fill;
@@ -453,8 +513,8 @@ app.post('/averageFillTimePerType', (req, res) => {
                 usedTypeIds.forEach(typeId => {
                     const fillSum = typeAverages[typeId].fillSum;
                     const daysSum = typeAverages[typeId].daysSum;
-                    
-                    const averageDaysToFill = fillSum == 0 ? 0 : daysSum/fillSum;
+
+                    const averageDaysToFill = fillSum == 0 ? 0 : daysSum / fillSum;
 
                     response.push({
                         typeId: typeId,
@@ -484,7 +544,7 @@ app.post('/renameSite', (req, res) => {
         const townPrefix = session.townPrefix;
         console.log(newName);
         db.query(
-            'UPDATE '+townPrefix+'__sites SET name = \''+newName+'\' WHERE id = ?',
+            'UPDATE ' + townPrefix + '__sites SET name = \'' + newName + '\' WHERE id = ?',
             [siteId],
             (err) => {
                 if (err) {
@@ -508,9 +568,9 @@ app.put('/newRecord', (req, res) => {
     const fill = req.body.record.fill;
     const baterry = req.body.record.baterry;
     const blocked = req.body.record.blocked;
-    
+
     db.query(
-        'SELECT * FROM '+townPrefix+'__containers WHERE id = ?',
+        'SELECT * FROM ' + townPrefix + '__containers WHERE id = ?',
         [containerId],
         (err, result) => {
             if (err) {
@@ -518,25 +578,25 @@ app.put('/newRecord', (req, res) => {
                 res.sendStatus(400);
             } else {
                 console.log('comparing', containerKey, result[0]);
-                bcrypt.compare(containerKey, result[0].key, function(err, result) {
+                bcrypt.compare(containerKey, result[0].key, function (err, result) {
                     if (result) {
 
                         //put the record in the database
-                        db.query('INSERT INTO '+townPrefix+'__records (container_id, record_datetime, fill, baterry, blocked) VALUES ( ?, ?, ?, ?, ?)',
-                        [containerId, dateTime, fill, baterry, blocked],
-                        (err, result) => {
-                            if (err) {
-                                console.log(err),
-                                res.sendStatus(500);
-                            } else {
-                                res.sendStatus(200);
-                                //maybe notify logged-in clients
-                            }
-                        });
+                        db.query('INSERT INTO ' + townPrefix + '__records (container_id, record_datetime, fill, baterry, blocked) VALUES ( ?, ?, ?, ?, ?)',
+                            [containerId, dateTime, fill, baterry, blocked],
+                            (err, result) => {
+                                if (err) {
+                                    console.log(err),
+                                        res.sendStatus(500);
+                                } else {
+                                    res.sendStatus(200);
+                                    //maybe notify logged-in clients
+                                }
+                            });
 
                     } else {
                         res.sendStatus(403);
-                    } 
+                    }
                 });
             }
         }
@@ -548,6 +608,6 @@ app.put('/newRecord', (req, res) => {
 
 
 
-app.listen(3001, () => {
-    console.log('backend server running on localhost:3001');
+app.listen(8080, () => {
+    console.log('backend server running on localhost:8080');
 });
